@@ -56,8 +56,22 @@ defmodule Commanded.Projections.Ecto do
         projection_name = Map.fetch!(metadata, :handler_name)
         event_number = Map.fetch!(metadata, :event_number)
 
+        partition =
+          cond do
+            function_exported?(__MODULE__, :partition_key, 2) ->
+              apply(__MODULE__, :partition_key, [event, metadata])
+
+            function_exported?(__MODULE__, :partition_by, 2) ->
+              partition_by = apply(__MODULE__, :partition_by, [event, metadata])
+              if is_binary(partition_by), do: partition_by
+
+            true ->
+              nil
+          end
+
         projection_version = %ProjectionVersion{
           projection_name: projection_name,
+          partition: partition,
           last_seen_event_number: event_number
         }
 
@@ -79,7 +93,7 @@ defmodule Commanded.Projections.Ecto do
               repo.insert(projection_version,
                 prefix: prefix,
                 on_conflict: update_projection_version,
-                conflict_target: [:projection_name]
+                conflict_target: [:projection_name, :partition]
               )
             rescue
               exception in Ecto.StaleEntryError ->
@@ -115,7 +129,7 @@ defmodule Commanded.Projections.Ecto do
 
   ## User callbacks
 
-  @optional_callbacks [after_update: 3, schema_prefix: 1, schema_prefix: 2]
+  @optional_callbacks [after_update: 3, partition_key: 2, schema_prefix: 1, schema_prefix: 2]
 
   @doc """
   The optional `after_update/3` callback function defined in a projector is
@@ -149,6 +163,12 @@ defmodule Commanded.Projections.Ecto do
   """
   @callback after_update(event :: struct, metadata :: map, changes :: Ecto.Multi.changes()) ::
               :ok | {:ok, any} | {:error, any}
+
+  @doc """
+  The optional `partition_key/2` callback function narrows the
+  `Commanded.Event.Handler.partition_by/2` callback to return either a `t:String.t()` or `nil`.
+  """
+  @callback partition_key(event :: struct, metadata :: map) :: String.t() | nil
 
   @doc """
   The optional `schema_prefix/1` callback function defined in a projector is
@@ -204,9 +224,11 @@ defmodule Commanded.Projections.Ecto do
         @moduledoc false
         use Ecto.Schema
 
-        @primary_key {:projection_name, :string, []}
+        @primary_key false
 
         schema "projection_versions" do
+          field(:projection_name, :string, primary_key: true)
+          field(:partition, :binary, primary_key: true)
           field(:last_seen_event_number, :integer)
 
           timestamps(type: :naive_datetime_usec)
